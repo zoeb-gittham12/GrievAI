@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import com.rork.grievai.data.Complaint
 import com.rork.grievai.data.ComplaintVisibility
 import com.rork.grievai.data.MockRepository
+import com.rork.grievai.data.User
 import com.rork.grievai.ui.components.AIAnalysisCard
 import com.rork.grievai.ui.components.ComplaintTimeline
 import com.rork.grievai.ui.components.IconChip
@@ -60,6 +61,7 @@ import com.rork.grievai.ui.components.StatusGradientBadge
 @Composable
 fun ComplaintDetailScreen(
     complaintId: String,
+    user: User,
     onBack: () -> Unit
 ) {
     var complaint by remember { mutableStateOf<Complaint?>(null) }
@@ -80,13 +82,14 @@ fun ComplaintDetailScreen(
             )
         },
         bottomBar = {
-            if (complaint?.visibility == ComplaintVisibility.PUBLIC) {
+            if (complaint != null) {
                 CommentInputBar(
                     text = commentText,
                     onTextChange = { commentText = it },
+                    placeholder = if (complaint?.visibility == ComplaintVisibility.PUBLIC) "Add a comment..." else "Reply to ${if (user.role == com.rork.grievai.data.UserRole.ADMIN) "student" else "admin"}...",
                     onSend = {
                         if (commentText.isNotBlank()) {
-                            MockRepository.addComment(complaintId, commentText)
+                            MockRepository.addComment(complaintId, commentText, author = user.name)
                             commentText = ""
                             refreshKey++
                         }
@@ -193,21 +196,38 @@ fun ComplaintDetailScreen(
                 ComplaintTimeline(events = c.timeline)
             }
 
-            // Comments
+            // Comments (public) / Private reply thread (private)
+            Spacer(Modifier.height(20.dp))
             if (c.visibility == ComplaintVisibility.PUBLIC) {
-                Spacer(Modifier.height(20.dp))
                 Text("Comments (${c.comments.size})", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.padding(horizontal = 4.dp))
+            } else {
+                Text("Messages with Admin (${c.comments.size})", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.padding(horizontal = 4.dp))
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "Private thread — visible only to you and the admin handling this complaint.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            if (c.comments.isEmpty()) {
+                Text(
+                    if (c.visibility == ComplaintVisibility.PUBLIC) "No comments yet." else "No messages yet — send a reply below.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
+            c.comments.forEach { comment ->
+                CommentItem(
+                    comment = comment,
+                    onLike = {
+                        MockRepository.toggleCommentLike(c.id, comment.id)
+                        refreshKey++
+                    }
+                )
                 Spacer(Modifier.height(10.dp))
-                c.comments.forEach { comment ->
-                    CommentItem(
-                        comment = comment,
-                        onLike = {
-                            MockRepository.toggleCommentLike(c.id, comment.id)
-                            refreshKey++
-                        }
-                    )
-                    Spacer(Modifier.height(10.dp))
-                }
             }
 
             Spacer(Modifier.height(24.dp))
@@ -325,7 +345,8 @@ private fun CommentItem(
 private fun CommentInputBar(
     text: String,
     onTextChange: (String) -> Unit,
-    onSend: () -> Unit
+    onSend: () -> Unit,
+    placeholder: String = "Add a comment..."
 ) {
     Row(
         modifier = Modifier
@@ -337,7 +358,7 @@ private fun CommentInputBar(
         OutlinedTextField(
             value = text,
             onValueChange = onTextChange,
-            placeholder = { Text("Add a comment...") },
+            placeholder = { Text(placeholder) },
             modifier = Modifier.weight(1f),
             shape = RoundedCornerShape(24.dp),
             singleLine = true

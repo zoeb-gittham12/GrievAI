@@ -1,29 +1,35 @@
 package com.rork.grievai.ui.navigation
 
-import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.rork.grievai.data.AppPreferences
 import com.rork.grievai.data.SessionViewModel
 import com.rork.grievai.data.UserRole
 import com.rork.grievai.ui.screens.auth.ForgotPasswordScreen
 import com.rork.grievai.ui.screens.auth.LoginScreen
 import com.rork.grievai.ui.screens.auth.OnboardingScreen
 import com.rork.grievai.ui.screens.auth.OtpVerificationScreen
+import com.rork.grievai.ui.screens.auth.PinSetupScreen
+import com.rork.grievai.ui.screens.auth.PinUnlockScreen
 import com.rork.grievai.ui.screens.auth.RoleSelectionScreen
 import com.rork.grievai.ui.screens.auth.SignUpScreen
 import com.rork.grievai.ui.screens.auth.SplashScreen
 import com.rork.grievai.ui.screens.student.ComplaintDetailScreen
 import com.rork.grievai.ui.screens.student.SubmitComplaintScreen
+import kotlinx.coroutines.delay
 
 object Routes {
     const val SPLASH = "splash"
@@ -33,6 +39,8 @@ object Routes {
     const val SIGN_UP = "signup"
     const val FORGOT_PASSWORD = "forgot_password"
     const val OTP = "otp"
+    const val PIN_SETUP = "pin_setup"
+    const val PIN_UNLOCK = "pin_unlock"
     const val MAIN = "main"
     const val COMPLAINT_DETAIL = "complaint_detail"
     const val SUBMIT_COMPLAINT = "submit_complaint"
@@ -43,6 +51,24 @@ fun AppNavigation() {
     val navController = rememberNavController()
     val sessionViewModel: SessionViewModel = viewModel()
     val user by sessionViewModel.user.collectAsState()
+    val context = LocalContext.current
+    val prefs = remember { AppPreferences(context) }
+
+    fun goMain() {
+        navController.navigate(Routes.MAIN) {
+            popUpTo(0) { inclusive = true }
+        }
+    }
+
+    fun goAfterAuth() {
+        if (!prefs.hasPin()) {
+            navController.navigate(Routes.PIN_SETUP) {
+                popUpTo(0) { inclusive = true }
+            }
+        } else {
+            goMain()
+        }
+    }
 
     NavHost(
         navController = navController,
@@ -53,15 +79,26 @@ fun AppNavigation() {
         popExitTransition = { fadeOut(tween(200)) + slideOutHorizontally(tween(200)) { it / 6 } }
     ) {
         composable(Routes.SPLASH) {
-            SplashScreen(onNavigateNext = {
-                navController.navigate(Routes.ONBOARDING) {
+            val sessionReady by sessionViewModel.sessionReady.collectAsState()
+            SplashScreen(onNavigateNext = { /* driven below */ })
+            LaunchedEffect(sessionReady) {
+                if (!sessionReady) return@LaunchedEffect
+                delay(400)
+                val next = when {
+                    !prefs.hasCompletedOnboarding -> Routes.ONBOARDING
+                    prefs.hasPin() -> Routes.PIN_UNLOCK   // PIN exists → always unlock
+                    user != null -> Routes.PIN_SETUP
+                    else -> Routes.ROLE_SELECTION
+                }
+                navController.navigate(next) {
                     popUpTo(Routes.SPLASH) { inclusive = true }
                 }
-            })
+            }
         }
 
         composable(Routes.ONBOARDING) {
             OnboardingScreen(onFinish = {
+                prefs.hasCompletedOnboarding = true
                 navController.navigate(Routes.ROLE_SELECTION) {
                     popUpTo(Routes.ONBOARDING) { inclusive = true }
                 }
@@ -70,9 +107,8 @@ fun AppNavigation() {
 
         composable(Routes.ROLE_SELECTION) {
             RoleSelectionScreen(onRoleSelected = { role ->
-                navController.navigate("${Routes.LOGIN}/${role.name}") {
-                    popUpTo(Routes.ROLE_SELECTION) { inclusive = true }
-                }
+                prefs.lastRole = role.name
+                navController.navigate("${Routes.LOGIN}/${role.name}")
             })
         }
 
@@ -82,11 +118,14 @@ fun AppNavigation() {
             )
             LoginScreen(
                 role = role,
-                onBack = { navController.navigate(Routes.ROLE_SELECTION) { popUpTo(0) } },
-                onLoginSuccess = {
-                    navController.navigate(Routes.MAIN) {
+                onBack = {
+                    navController.navigate(Routes.ROLE_SELECTION) {
                         popUpTo(0) { inclusive = true }
                     }
+                },
+                onLoginSuccess = {
+                    prefs.lastRole = role.name
+                    goAfterAuth()
                 },
                 onForgotPassword = { navController.navigate(Routes.FORGOT_PASSWORD) },
                 onSignUp = { navController.navigate("${Routes.SIGN_UP}/${role.name}") },
@@ -102,12 +141,32 @@ fun AppNavigation() {
                 role = role,
                 onBack = { navController.popBackStack() },
                 onSignUpSuccess = {
-                    navController.navigate(Routes.MAIN) {
-                        popUpTo(0) { inclusive = true }
-                    }
+                    prefs.lastRole = role.name
+                    goAfterAuth()
                 },
                 onLogin = { navController.popBackStack() },
                 sessionViewModel = sessionViewModel
+            )
+        }
+
+        composable(Routes.PIN_SETUP) {
+            PinSetupScreen(onPinSet = { pin ->
+                prefs.setPin(pin)
+                goMain()
+            })
+        }
+
+        composable(Routes.PIN_UNLOCK) {
+            PinUnlockScreen(
+                verifyPin = { prefs.verifyPin(it) },
+                onUnlocked = { goMain() },
+                onUsePassword = {
+                    sessionViewModel.logout()
+                    prefs.clearPin()
+                    navController.navigate(Routes.ROLE_SELECTION) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
             )
         }
 
@@ -142,6 +201,7 @@ fun AppNavigation() {
                     },
                     onLogout = {
                         sessionViewModel.logout()
+                        prefs.clearPin()
                         navController.navigate(Routes.ROLE_SELECTION) {
                             popUpTo(0) { inclusive = true }
                         }
@@ -150,15 +210,25 @@ fun AppNavigation() {
                         sessionViewModel.updateProfile(name, dept, enroll)
                     }
                 )
+            } else {
+                LaunchedEffect(Unit) {
+                    navController.navigate(Routes.ROLE_SELECTION) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
             }
         }
 
         composable("${Routes.COMPLAINT_DETAIL}/{complaintId}") { backStackEntry ->
             val complaintId = backStackEntry.arguments?.getString("complaintId") ?: ""
-            ComplaintDetailScreen(
-                complaintId = complaintId,
-                onBack = { navController.popBackStack() }
-            )
+            val currentUser = user
+            if (currentUser != null) {
+                ComplaintDetailScreen(
+                    complaintId = complaintId,
+                    user = currentUser,
+                    onBack = { navController.popBackStack() }
+                )
+            }
         }
 
         composable(Routes.SUBMIT_COMPLAINT) {

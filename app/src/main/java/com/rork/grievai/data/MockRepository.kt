@@ -355,6 +355,100 @@ object MockRepository {
         return notifications.toList()
     }
 
+    // ── Admin status workflow ────────────────────────────────────────────────
+    // Complaints move strictly forward: SUBMITTED -> UNDER_REVIEW -> ASSIGNED ->
+    // IN_PROGRESS -> RESOLVED. There is no way to skip a step from here; each
+    // call only ever advances to (current status + 1).
+
+    sealed class UpdateResult {
+        data class Success(val complaint: Complaint) : UpdateResult()
+        data class Error(val message: String) : UpdateResult()
+    }
+
+    fun advanceComplaintStatus(
+        complaintId: String,
+        actorName: String,
+        department: String? = null,
+        coordinator: String? = null,
+        progressNotes: String? = null
+    ): UpdateResult {
+        val c = complaints.find { it.id == complaintId }
+            ?: return UpdateResult.Error("Complaint not found.")
+        val idx = complaints.indexOf(c)
+
+        if (c.status == ComplaintStatus.RESOLVED) {
+            return UpdateResult.Error("This complaint is already resolved.")
+        }
+
+        val nextStatus = ComplaintStatus.values().getOrNull(c.status.ordinal + 1)
+            ?: return UpdateResult.Error("There is no further status to advance to.")
+
+        val description = when (nextStatus) {
+            ComplaintStatus.UNDER_REVIEW ->
+                "AI flagged this complaint for review — matched against similar historical cases."
+            ComplaintStatus.ASSIGNED -> {
+                if (department.isNullOrBlank() || coordinator.isNullOrBlank()) {
+                    return UpdateResult.Error("Department and coordinator are required to assign this complaint.")
+                }
+                "Assigned to $department — Coordinator: $coordinator"
+            }
+            ComplaintStatus.IN_PROGRESS -> {
+                if (progressNotes.isNullOrBlank()) {
+                    return UpdateResult.Error("Please add progress notes before marking this complaint in progress.")
+                }
+                progressNotes
+            }
+            ComplaintStatus.RESOLVED -> "Marked resolved by $actorName."
+            ComplaintStatus.SUBMITTED -> "Submitted." // unreachable as a "next" status
+        }
+
+        val updatedTimeline = c.timeline.map { event ->
+            if (event.status == nextStatus) {
+                event.copy(description = description, timestamp = now(), by = actorName, completed = true)
+            } else event
+        }
+
+        val resolutionHours = if (nextStatus == ComplaintStatus.RESOLVED) {
+            try {
+                val created = fmt.parse(c.createdAt)?.time ?: System.currentTimeMillis()
+                ((System.currentTimeMillis() - created) / 3_600_000L).toInt().coerceAtLeast(1)
+            } catch (e: Exception) { null }
+        } else c.resolutionTimeHours
+
+        val updated = c.copy(
+            status = nextStatus,
+            updatedAt = now(),
+            timeline = updatedTimeline,
+            resolutionTimeHours = resolutionHours
+        )
+        complaints[idx] = updated
+
+        notifications.add(0, NotificationItem(
+            id = "n_${System.currentTimeMillis()}",
+            type = if (nextStatus == ComplaintStatus.RESOLVED) NotificationType.COMPLAINT_RESOLVED else NotificationType.STATUS_CHANGED,
+            title = if (nextStatus == ComplaintStatus.RESOLVED) "Complaint Resolved" else "Status Updated",
+            message = "Your complaint '${c.title}' is now ${nextStatus.label}.",
+            timestamp = now(),
+            read = false,
+            complaintId = c.id
+        ))
+
+        return UpdateResult.Success(updated)
+    }
+
+    fun updateComplaintPriority(complaintId: String, priority: ComplaintPriority): UpdateResult {
+        val c = complaints.find { it.id == complaintId }
+            ?: return UpdateResult.Error("Complaint not found.")
+        val idx = complaints.indexOf(c)
+        val updated = c.copy(priority = priority, updatedAt = now())
+        complaints[idx] = updated
+        return UpdateResult.Success(updated)
+    }
+
+    fun deleteComplaint(complaintId: String): Boolean {
+        return complaints.removeIf { it.id == complaintId }
+    }
+
     fun toggleUpvote(complaintId: String) {
         val c = complaints.find { it.id == complaintId } ?: return
         val idx = complaints.indexOf(c)
@@ -399,6 +493,20 @@ object MockRepository {
             likes = 0
         )
         complaints[idx] = c.copy(comments = c.comments + newComment)
+
+        // Private complaints are a 1:1 thread between the student and an admin.
+        // Whenever the *other* party posts, let the author know.
+        if (c.visibility == ComplaintVisibility.PRIVATE && author != c.authorName) {
+            notifications.add(0, NotificationItem(
+                id = "n_${System.currentTimeMillis()}",
+                type = NotificationType.ADMIN_REPLY,
+                title = "New Reply",
+                message = "$author replied on '${c.title}'.",
+                timestamp = now(),
+                read = false,
+                complaintId = c.id
+            ))
+        }
     }
 
     fun submitComplaint(
@@ -439,7 +547,7 @@ object MockRepository {
             aiAnalysis = aiAnalysis,
             timeline = listOf(
                 TimelineEvent("t1", ComplaintStatus.SUBMITTED, "Complaint Submitted", "Received and logged into the system", now(), authorName, true),
-                TimelineEvent("t2", ComplaintStatus.UNDER_REVIEW, "Under Review", "AI analysis complete", now(), "GrievAI System", true),
+                TimelineEvent("t2", ComplaintStatus.UNDER_REVIEW, "Under Review", "Pending", "", "", false),
                 TimelineEvent("t3", ComplaintStatus.ASSIGNED, "Assigned", "Pending", "", "", false),
                 TimelineEvent("t4", ComplaintStatus.IN_PROGRESS, "In Progress", "Pending", "", "", false),
                 TimelineEvent("t5", ComplaintStatus.RESOLVED, "Resolved", "Pending", "", "", false)

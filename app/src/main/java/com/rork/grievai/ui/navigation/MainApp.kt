@@ -108,7 +108,8 @@ fun MainApp(
                             onComplaintClick = onComplaintClick,
                             onSubmitComplaint = onSubmitComplaint,
                             onPublicFeed = { selectedTab = 2 },
-                            onSeeAllComplaints = { selectedTab = 1 }
+                            onSeeAllComplaints = { selectedTab = 1 },
+                            onProfileClick = { selectedTab = 4 }
                         )
                         1 -> StudentComplaintsScreen(user = user, onComplaintClick = onComplaintClick)
                         2 -> PublicFeedScreen(onComplaintClick = onComplaintClick)
@@ -123,9 +124,10 @@ fun MainApp(
                             onComplaintClick = onComplaintClick,
                             onSeeAllComplaints = { selectedTab = 1 },
                             onGoAnalytics = { selectedTab = 2 },
-                            onGoAI = { selectedTab = 3 }
+                            onGoAI = { selectedTab = 3 },
+                            onProfileClick = { selectedTab = 4 }
                         )
-                        1 -> AdminComplaintManagementScreen(onComplaintClick = onComplaintClick)
+                        1 -> AdminComplaintManagementScreen(user = user, onComplaintClick = onComplaintClick)
                         2 -> AdminAnalyticsScreen()
                         3 -> AdminAIInsightsScreen()
                         4 -> AdminProfileScreen(

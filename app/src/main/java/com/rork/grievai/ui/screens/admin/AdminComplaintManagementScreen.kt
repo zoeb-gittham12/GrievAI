@@ -20,9 +20,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Assignment
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Person
@@ -36,6 +39,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -66,6 +71,7 @@ import com.rork.grievai.data.ComplaintPriority
 import com.rork.grievai.data.ComplaintStatus
 import com.rork.grievai.data.Departments
 import com.rork.grievai.data.MockRepository
+import com.rork.grievai.data.User
 import com.rork.grievai.ui.components.ComplaintCard
 import com.rork.grievai.ui.components.EmptyState
 import com.rork.grievai.ui.components.PriorityPill
@@ -79,6 +85,7 @@ private val sortOptions = listOf("Newest", "Priority", "Most Supported")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AdminComplaintManagementScreen(
+    user: User,
     onComplaintClick: (String) -> Unit
 ) {
     var complaints by remember { mutableStateOf<List<Complaint>?>(null) }
@@ -88,14 +95,18 @@ fun AdminComplaintManagementScreen(
     var sortBy by remember { mutableStateOf("Newest") }
     var sortMenuOpen by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableStateOf(0) }
-    var manageComplaint by remember { mutableStateOf<Complaint?>(null) }
+    var manageComplaintId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit, refreshKey) { complaints = MockRepository.getAllComplaints() }
 
+    // Re-resolve the sheet's complaint from the latest list on every refresh so
+    // it reflects status/priority changes immediately instead of showing stale data.
+    val manageComplaint = manageComplaintId?.let { id -> complaints?.find { it.id == id } }
+
     val filtered = complaints?.filter { c ->
         (statusFilter == "All" || c.status.label == statusFilter) &&
-        (priorityFilter == "All" || c.priority.label == priorityFilter) &&
-        (searchQuery.isBlank() || c.title.contains(searchQuery, true) || c.authorName.contains(searchQuery, true))
+                (priorityFilter == "All" || c.priority.label == priorityFilter) &&
+                (searchQuery.isBlank() || c.title.contains(searchQuery, true) || c.authorName.contains(searchQuery, true))
     }?.let { list ->
         when (sortBy) {
             "Newest" -> list.sortedByDescending { it.createdAt }
@@ -204,7 +215,7 @@ fun AdminComplaintManagementScreen(
                     items(filtered, key = { it.id }) { c ->
                         ComplaintCard(
                             complaint = c,
-                            onClick = { manageComplaint = c },
+                            onClick = { manageComplaintId = c.id },
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                         )
                     }
@@ -217,38 +228,70 @@ fun AdminComplaintManagementScreen(
     manageComplaint?.let { complaint ->
         AdminManageSheet(
             complaint = complaint,
-            onDismiss = { manageComplaint = null },
-            onStatusChange = { newStatus ->
-                // In a real app, persist via API. For demo, just close.
-                manageComplaint = null
-                refreshKey++
-            },
-            onPriorityChange = { newPriority ->
-                manageComplaint = null
-                refreshKey++
-            },
+            actorName = user.name,
+            onDismiss = { manageComplaintId = null },
+            onChanged = { refreshKey++ },
+            onDeleted = { manageComplaintId = null; refreshKey++ },
             onViewDetail = {
                 val id = complaint.id
-                manageComplaint = null
+                manageComplaintId = null
                 onComplaintClick(id)
             }
         )
     }
 }
 
+/**
+ * Status can only move forward one step at a time: SUBMITTED -> UNDER_REVIEW ->
+ * ASSIGNED -> IN_PROGRESS -> RESOLVED. UNDER_REVIEW applies immediately with an
+ * automatic AI-flagged note. ASSIGNED and IN_PROGRESS require a dialog for the
+ * admin to enter the relevant details. RESOLVED is only reachable once every
+ * prior stage is complete, and asks for a final confirmation since it's terminal.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AdminManageSheet(
     complaint: Complaint,
+    actorName: String,
     onDismiss: () -> Unit,
-    onStatusChange: (ComplaintStatus) -> Unit,
-    onPriorityChange: (ComplaintPriority) -> Unit,
+    onChanged: () -> Unit,
+    onDeleted: () -> Unit,
     onViewDetail: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var statusMenuOpen by remember { mutableStateOf(false) }
     var priorityMenuOpen by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    var showAssignDialog by remember { mutableStateOf(false) }
+    var showInProgressDialog by remember { mutableStateOf(false) }
+    var showResolveConfirm by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var successMessage by remember { mutableStateOf<String?>(null) }
+
+    val nextStatus = ComplaintStatus.values().getOrNull(complaint.status.ordinal + 1)
+
+    fun applyAdvance(department: String? = null, coordinator: String? = null, notes: String? = null) {
+        when (val result = MockRepository.advanceComplaintStatus(
+            complaintId = complaint.id,
+            actorName = actorName,
+            department = department,
+            coordinator = coordinator,
+            progressNotes = notes
+        )) {
+            is MockRepository.UpdateResult.Success -> {
+                errorMessage = null
+                successMessage = when (result.complaint.status) {
+                    ComplaintStatus.UNDER_REVIEW -> "AI flagged this complaint for review."
+                    ComplaintStatus.RESOLVED -> "Complaint marked as resolved."
+                    else -> "Status updated to ${result.complaint.status.label}."
+                }
+                onChanged()
+            }
+            is MockRepository.UpdateResult.Error -> {
+                successMessage = null
+                errorMessage = result.message
+            }
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -268,35 +311,101 @@ private fun AdminManageSheet(
                 PriorityPill(complaint.priority)
             }
 
+            // Inline feedback banner (clear success/error handling, no dialog needed)
+            errorMessage?.let { msg ->
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.errorContainer)
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.ErrorOutline, contentDescription = null, tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                }
+            }
+            successMessage?.let { msg ->
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer)
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Medium)
+                }
+            }
+
             Spacer(Modifier.height(20.dp))
 
-            // Status selector
+            // Sequential status advancement
             Text("Update Status", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Complaints move through each stage in order — steps can't be skipped.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(Modifier.height(8.dp))
-            Box {
+
+            if (nextStatus == null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.Verified, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("This complaint is fully resolved.", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                }
+            } else {
                 Button(
-                    onClick = { statusMenuOpen = true },
+                    onClick = {
+                        errorMessage = null
+                        successMessage = null
+                        when (nextStatus) {
+                            ComplaintStatus.UNDER_REVIEW -> applyAdvance() // no dialog — automatic AI-flagged note
+                            ComplaintStatus.ASSIGNED -> showAssignDialog = true
+                            ComplaintStatus.IN_PROGRESS -> showInProgressDialog = true
+                            ComplaintStatus.RESOLVED -> showResolveConfirm = true
+                            ComplaintStatus.SUBMITTED -> Unit // unreachable
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.outlinedButtonColors()
+                    colors = if (nextStatus == ComplaintStatus.RESOLVED)
+                        ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+                    else ButtonDefaults.buttonColors()
                 ) {
-                    Text(complaint.status.label)
-                    Spacer(Modifier.weight(1f))
-                    Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(16.dp))
-                }
-                DropdownMenu(expanded = statusMenuOpen, onDismissRequest = { statusMenuOpen = false }) {
-                    ComplaintStatus.values().forEach { st ->
-                        DropdownMenuItem(
-                            text = { Text(st.label) },
-                            onClick = { statusMenuOpen = false; onStatusChange(st) }
-                        )
-                    }
+                    Icon(
+                        when (nextStatus) {
+                            ComplaintStatus.UNDER_REVIEW -> Icons.Filled.Forum
+                            ComplaintStatus.ASSIGNED -> Icons.Filled.Assignment
+                            ComplaintStatus.IN_PROGRESS -> Icons.Filled.PlayArrow
+                            ComplaintStatus.RESOLVED -> Icons.Filled.Verified
+                            ComplaintStatus.SUBMITTED -> Icons.Filled.Check
+                        },
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Mark as ${nextStatus.label}", fontWeight = FontWeight.SemiBold)
                 }
             }
 
             Spacer(Modifier.height(14.dp))
 
-            // Priority selector
+            // Priority selector (independent of the status sequence)
             Text("Assign Priority", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
             Spacer(Modifier.height(8.dp))
             Box {
@@ -314,7 +423,20 @@ private fun AdminManageSheet(
                     ComplaintPriority.values().forEach { pr ->
                         DropdownMenuItem(
                             text = { Text(pr.label) },
-                            onClick = { priorityMenuOpen = false; onPriorityChange(pr) }
+                            onClick = {
+                                priorityMenuOpen = false
+                                when (val result = MockRepository.updateComplaintPriority(complaint.id, pr)) {
+                                    is MockRepository.UpdateResult.Success -> {
+                                        errorMessage = null
+                                        successMessage = "Priority set to ${pr.label}."
+                                        onChanged()
+                                    }
+                                    is MockRepository.UpdateResult.Error -> {
+                                        successMessage = null
+                                        errorMessage = result.message
+                                    }
+                                }
+                            }
                         )
                     }
                 }
@@ -333,16 +455,6 @@ private fun AdminManageSheet(
                     Spacer(Modifier.width(6.dp))
                     Text("Reply")
                 }
-                Button(
-                    onClick = onViewDetail,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
-                ) {
-                    Icon(Icons.Filled.Verified, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Resolve")
-                }
             }
             Spacer(Modifier.height(10.dp))
             OutlinedButton(
@@ -359,13 +471,125 @@ private fun AdminManageSheet(
         }
     }
 
+    // ── Assign dialog: department + coordinator ─────────────────────────────
+    if (showAssignDialog) {
+        var department by remember { mutableStateOf(complaint.department) }
+        var coordinator by remember { mutableStateOf("") }
+        var deptMenuOpen by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { showAssignDialog = false },
+            title = { Text("Assign Complaint", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        "Choose the department and coordinator responsible for handling this complaint.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    ExposedDropdownMenuBox(expanded = deptMenuOpen, onExpandedChange = { deptMenuOpen = it }) {
+                        OutlinedTextField(
+                            value = department,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Department") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = deptMenuOpen) },
+                            modifier = Modifier.fillMaxWidth().menuAnchor(),
+                            singleLine = true
+                        )
+                        DropdownMenu(expanded = deptMenuOpen, onDismissRequest = { deptMenuOpen = false }) {
+                            Departments.all.forEach { dept ->
+                                DropdownMenuItem(text = { Text(dept) }, onClick = { department = dept; deptMenuOpen = false })
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = coordinator,
+                        onValueChange = { coordinator = it },
+                        label = { Text("Coordinator Name") },
+                        placeholder = { Text("e.g. Dr. Rajesh Kumar") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = department.isNotBlank() && coordinator.isNotBlank(),
+                    onClick = {
+                        showAssignDialog = false
+                        applyAdvance(department = department, coordinator = coordinator)
+                    }
+                ) { Text("Assign", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { showAssignDialog = false }) { Text("Cancel") } }
+        )
+    }
+
+    // ── In-progress dialog: work details ─────────────────────────────────────
+    if (showInProgressDialog) {
+        var notes by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showInProgressDialog = false },
+            title = { Text("Mark In Progress", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        "Add a short note on what work is being done, so the student can see progress.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    OutlinedTextField(
+                        value = notes,
+                        onValueChange = { notes = it },
+                        label = { Text("Progress Notes") },
+                        placeholder = { Text("e.g. Maintenance team dispatched, ETA 2 days") },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = notes.isNotBlank(),
+                    onClick = {
+                        showInProgressDialog = false
+                        applyAdvance(notes = notes)
+                    }
+                ) { Text("Update", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { showInProgressDialog = false }) { Text("Cancel") } }
+        )
+    }
+
+    // ── Resolve confirmation (terminal action, so confirm before applying) ──
+    if (showResolveConfirm) {
+        AlertDialog(
+            onDismissRequest = { showResolveConfirm = false },
+            title = { Text("Resolve Complaint?", fontWeight = FontWeight.Bold) },
+            text = { Text("This marks the complaint as fully resolved and notifies the student. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = { showResolveConfirm = false; applyAdvance() }) {
+                    Text("Resolve", color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = { TextButton(onClick = { showResolveConfirm = false }) { Text("Cancel") } }
+        )
+    }
+
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
             title = { Text("Delete Complaint?", fontWeight = FontWeight.Bold) },
             text = { Text("This complaint will be removed as spam. This action cannot be undone.") },
             confirmButton = {
-                TextButton(onClick = { showDeleteDialog = false; onDismiss() }) {
+                TextButton(onClick = {
+                    showDeleteDialog = false
+                    MockRepository.deleteComplaint(complaint.id)
+                    onDeleted()
+                }) {
                     Text("Delete", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                 }
             },

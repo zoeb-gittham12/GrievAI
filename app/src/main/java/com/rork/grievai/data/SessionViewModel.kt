@@ -35,14 +35,33 @@ class SessionViewModel : ViewModel() {
     val isStudent: Boolean get() = _user.value?.role == UserRole.STUDENT
     val isAdmin: Boolean get() = _user.value?.role == UserRole.ADMIN
 
+    private val _sessionReady = MutableStateFlow(false)
+    val sessionReady: StateFlow<Boolean> = _sessionReady.asStateFlow()
+
     init {
-        // Restore session automatically if the user was already logged in
-        // (Supabase persists the session token on-device between app launches).
         viewModelScope.launch {
-            val status = supa.auth.sessionStatus.value
-            if (status is SessionStatus.Authenticated) {
-                fetchProfileIntoState(status.session.user?.id)
+            try {
+                supa.auth.sessionStatus.collect { status ->
+                    when (status) {
+                        is SessionStatus.Authenticated -> {
+                            fetchProfileIntoState(status.session.user?.id)
+                            _sessionReady.value = true
+                        }
+                        is SessionStatus.NotAuthenticated -> {
+                            _user.value = null
+                            _sessionReady.value = true
+                        }
+                        else -> { /* still loading from storage */ }
+                    }
+                }
+            } catch (_: Exception) {
+                _sessionReady.value = true
             }
+        }
+        // Never hang on splash forever
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(2500)
+            if (!_sessionReady.value) _sessionReady.value = true
         }
     }
 

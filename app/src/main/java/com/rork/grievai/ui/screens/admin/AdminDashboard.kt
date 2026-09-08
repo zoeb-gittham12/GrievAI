@@ -68,7 +68,8 @@ fun AdminDashboard(
     onComplaintClick: (String) -> Unit,
     onSeeAllComplaints: () -> Unit,
     onGoAnalytics: () -> Unit,
-    onGoAI: () -> Unit
+    onGoAI: () -> Unit,
+    onProfileClick: () -> Unit
 ) {
     var complaints by remember { mutableStateOf<List<Complaint>?>(null) }
     LaunchedEffect(Unit) { complaints = MockRepository.getAllComplaints() }
@@ -100,10 +101,11 @@ fun AdminDashboard(
                             modifier = Modifier
                                 .size(48.dp)
                                 .clip(CircleShape)
-                                .background(Color.White.copy(alpha = 0.25f)),
+                                .background(Color.White.copy(alpha = 0.25f))
+                                .clickable(onClick = onProfileClick),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Filled.AdminPanelSettings, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
+                            Icon(Icons.Filled.AdminPanelSettings, contentDescription = "View profile", tint = Color.White, modifier = Modifier.size(26.dp))
                         }
                         Spacer(Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {

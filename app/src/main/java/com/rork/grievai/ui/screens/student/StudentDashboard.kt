@@ -66,7 +66,8 @@ fun StudentDashboard(
     onComplaintClick: (String) -> Unit,
     onSubmitComplaint: () -> Unit,
     onPublicFeed: () -> Unit,
-    onSeeAllComplaints: () -> Unit
+    onSeeAllComplaints: () -> Unit,
+    onProfileClick: () -> Unit
 ) {
     var complaints by remember { mutableStateOf<List<Complaint>?>(null) }
     LaunchedEffect(Unit) { complaints = MockRepository.getStudentComplaints(user.id) }
@@ -102,7 +103,8 @@ fun StudentDashboard(
                             modifier = Modifier
                                 .size(48.dp)
                                 .clip(CircleShape)
-                                .background(Color.White.copy(alpha = 0.25f)),
+                                .background(Color.White.copy(alpha = 0.25f))
+                                .clickable(onClick = onProfileClick),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
@@ -329,5 +331,3 @@ private fun QuickActionCard(
         )
     }
 }
-
-
